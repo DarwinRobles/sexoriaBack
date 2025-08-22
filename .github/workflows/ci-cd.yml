@@ -88,7 +88,7 @@ jobs:
 
   deploy_production:
     name: Deploy to PRODUCTION (server)
-    environment: production   # puedes requerir aprobación aquí
+    environment: production   #aprobacion
     needs: [ci]
     if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
