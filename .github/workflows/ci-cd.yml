@@ -1,0 +1,133 @@
+name: CI/CD Strapi
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]      # deploy a STAGING al merge en main
+  release:
+    types: [published]      # deploy a PRODUCTION al crear una release
+
+jobs:
+  ci:
+    name: CI (lint & build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node 20
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache npm
+        uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Lint (opcional)
+        run: npm run lint --if-present
+
+      - name: Build Strapi admin
+        env:
+          NODE_ENV: production
+        run: npm run build
+
+  deploy_staging:
+    name: Deploy to STAGING (server)
+    needs: [ci]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps & build
+        run: |
+          npm ci
+          NODE_ENV=production npm run build
+
+      - name: Pack release
+        run: |
+          tar --exclude='.git' --exclude='node_modules' -czf release.tgz .
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Upload release to server
+        run: scp -o StrictHostKeyChecking=no release.tgz ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }}:/var/www/strapi/releases/${{ github.sha }}.tgz
+
+      - name: Deploy on server
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} '
+            set -e
+            cd /var/www/strapi/releases
+            mkdir -p ${{ github.sha }}
+            tar -xzf ${{ github.sha }}.tgz -C ${{ github.sha }}
+            cd ${{ github.sha }}
+            # prod deps solamente:
+            npm ci --omit=dev
+            # enlazar shared .env y ecosystem
+            ln -sfn /var/www/strapi/shared/.env.production .env
+            cd /var/www/strapi
+            ln -sfn /var/www/strapi/releases/${{ github.sha }} current
+            # (re)iniciar PM2
+            pm2 startOrReload /var/www/strapi/shared/ecosystem.config.js
+            pm2 save
+          '
+
+  deploy_production:
+    name: Deploy to PRODUCTION (server)
+    environment: production   # puedes requerir aprobación aquí
+    needs: [ci]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps & build
+        run: |
+          npm ci
+          NODE_ENV=production npm run build
+
+      - name: Pack release
+        run: |
+          tar --exclude='.git' --exclude='node_modules' -czf release.tgz .
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Upload release to server
+        run: scp -o StrictHostKeyChecking=no release.tgz ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }}:/var/www/strapi/releases/${{ github.sha }}.tgz
+
+      - name: Deploy on server
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_IP }} '
+            set -e
+            cd /var/www/strapi/releases
+            mkdir -p ${{ github.sha }}
+            tar -xzf ${{ github.sha }}.tgz -C ${{ github.sha }}
+            cd ${{ github.sha }}
+            npm ci --omit=dev
+            ln -sfn /var/www/strapi/shared/.env.production .env
+            cd /var/www/strapi
+            ln -sfn /var/www/strapi/releases/${{ github.sha }} current
+            pm2 startOrReload /var/www/strapi/shared/ecosystem.config.js
+            pm2 save
+          '
